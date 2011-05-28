@@ -93,6 +93,8 @@ class Writer(object):
 
     def _check(self, fieldname, value):
         pos = max(0, self._pos)
+        if pos >= len(self.message.fields):
+            raise SendlibError('attempt to write past end of message')
         field = self.message.fields[pos]
         if fieldname != field.name:
             if 'nil' in field.types:
@@ -178,6 +180,9 @@ class Writer(object):
         self._pos += 1
         return out
 
+    def flush(self):
+        self.stream.flush()
+
 class Data(object):
     __slots__ = ('length', 'stream', '_pos')
     def __init__(self, length, stream):
@@ -185,10 +190,13 @@ class Data(object):
         self.stream = stream
         self._pos = 0
 
-    def read(self, size):
+    def read(self, size=None):
         if self._pos >= self.length:
             return ''
-        amount = min(size, (self.length - self._pos))
+        if size:
+            amount = min(size, (self.length - self._pos))
+        else:
+            amount = self.length - self._pos
         out = self.stream.read(amount)
         self._pos += len(out)
         return out
@@ -316,7 +324,7 @@ class Field(object):
         self.name = name
         self.spec = types
         self.types = []
-        for type in tuple(_or.split(types)):
+        for type in _or.split(types):
             msgref = _msg.match(type)
             if msgref:
                 submsg = self.message.registry.get_message(
@@ -326,7 +334,7 @@ class Field(object):
                 if not submsg:
                     raise ParseError(
                         'unknown referenced message "%s"' %
-                        (msgref.group(1), int(msgref.group(2))))
+                        repr((msgref.group(1), int(msgref.group(2)))))
                 self.types.append(submsg)
             elif type not in PREFIX:
                 raise ParseError('unknown field type "%s"' % type)
@@ -436,10 +444,10 @@ def parse(definition_str):
                 f = Field(curr, name, type)
                 curr.fields.append(f)
                 names.add(name)
+                continue
             else:
                 raise ParseError(
                     'duplicate field name "%s" at line %d' % (name, lineno))
-            continue
 
         m = message.match(line)
         if m:
