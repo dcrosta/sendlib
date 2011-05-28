@@ -7,26 +7,7 @@ import unittest
 
 import sendlib
 
-class BasicTests(unittest.TestCase):
-
-    def test_parse(self):
-       definition = """
-       (foo, 1):
-         - bar: str
-         - baz: str
-
-       (foo2, 1):
-         - bar: int
-         - baz: float
-       """
-
-       msgs = sendlib.parse(definition)
-       self.assertEqual(2, len(msgs))
-
-       expected = sendlib.Message(
-           (('foo', 1), [('bar', ['str']), ('baz', ['str'])])
-       )
-       self.assertEqual(expected.definition, msgs[('foo', 1)].definition)
+class SerializationTest(unittest.TestCase):
 
     def test_write(self):
         definition = """
@@ -214,4 +195,48 @@ class BasicTests(unittest.TestCase):
 
         buf.seek(0, 0)
         self.assertFalse(msg.reader(buf).read('bar'))
+
+    def test_read_wrong_message(self):
+        definition = """
+        (foo, 1):
+          - bar: str
+          - baz: str or nil
+          - qux: str or nil
+
+        (bar, 1):
+          - foo: int
+          - baz: bool
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+        bar = msgs[('bar', 1)]
+
+        input = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x03BARS\x00\x00\x00\x03BAZS\x00\x00\x00\x03QUX'
+        reader = bar.reader(StringIO(input))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'foo')
+
+        # this should not raise
+        reader = foo.reader(StringIO(input))
+        self.assertEqual('BAR', reader.read('bar'))
+
+    def test_read_wrong_field(self):
+        definition = """
+        (foo, 1):
+          - bar: str
+          - baz: str
+        """
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        input = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x03BARS\x00\x00\x00\x03BAZ'
+        reader = foo.reader(StringIO(input))
+
+        self.assertRaises(sendlib.SendlibError, reader.read, 'baz')
+        self.assertEqual('BAR', reader.read('bar'))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'bar')
+        self.assertEqual('BAZ', reader.read('baz'))
+
+if __name__ == '__main__':
+    unittest.main()
 

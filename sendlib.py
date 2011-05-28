@@ -32,7 +32,7 @@ POSSIBILITY OF SUCH DAMAGE.
 """
 
 __version__ = '0.2'
-__all__ = ('parse', '__version__')
+__all__ = ('SendlibError', 'ParseError', 'parse', '__version__')
 
 import codecs
 import os
@@ -50,10 +50,13 @@ PREFIX = {
 }
 RPREFIX = dict((v, k) for k, v in PREFIX.items())
 
+class SendlibError(Exception): pass
+class ParseError(SendlibError): pass
+
 class Writer(object):
-    def __init__(self, definition, stream):
-        self.header = definition[0]
-        self.definition = definition[1]
+    __slots__ = ('message', 'stream', '_pos')
+    def __init__(self, message, stream):
+        self.message = message
         self.stream = stream
         self._pos = -1
 
@@ -81,25 +84,28 @@ class Writer(object):
         value.seek(0, os.SEEK_END)
         length = value.tell()
         if length > 4294967295:
-            raise ValueError('cannot accept file-like objects longer than 4294967295 bytes for data')
+            raise SendlibError(
+                'data length must be less than 4294967295 bytes')
         return True
 
     def _check(self, fieldname, value):
         pos = max(0, self._pos)
-        defn = self.definition[pos]
-        name, typenames = defn
-        if name != fieldname:
-            if 'nil' in typenames:
+        field = self.message.fields[pos]
+        if fieldname != field.name:
+            if 'nil' in field.types:
                 self._write_nil(None)
                 self._pos += 1
                 return self._check(fieldname, value)
-            raise ValueError('Attempting to access field "%s", but should be "%s"' % (fieldname, name))
-        for typename in typenames:
-            checker = getattr(self, '_check_' + typename)
+            raise SendlibError(
+                'Attempting to access field "%s", but should be "%s"' %
+                (fieldname, field.name))
+        for type in field.types:
+            checker = getattr(self, '_check_' + type)
             result = checker(value)
             if result:
-                return typename
-        raise ValueError('%s does not match message spec "%s"' % (value, defn))
+                return type
+        raise SendlibError(
+            '%s does not match message spec "%s"' % (value, defn))
 
     def _write_str(self, value):
         value = codecs.encode(value, 'utf-8')
@@ -139,67 +145,75 @@ class Writer(object):
             sofar += len(buf)
 
     def write(self, fieldname, value):
-        typename = self._check(fieldname, value)
+        type = self._check(fieldname, value)
         if self._pos == -1:
             # write header
             self.stream.write('M')
-            self._write_str(self.header[0])
-            self._write_int(self.header[1])
+            self._write_str(self.message.name)
+            self._write_int(self.message.version)
             self._pos = 0
 
-        writer = getattr(self, '_write_' + typename)
+        writer = getattr(self, '_write_' + type)
         writer(value)
         self._pos += 1
 
 class Data(object):
+    __slots__ = ('length', 'stream', '_pos')
     def __init__(self, length, stream):
-        self.pos = 0
         self.length = length
         self.stream = stream
+        self._pos = 0
 
     def read(self, size):
-        if self.pos >= self.length:
+        if self._pos >= self.length:
             return ''
-        amount = min(size, (self.length - self.pos))
+        amount = min(size, (self.length - self._pos))
         out = self.stream.read(amount)
-        self.pos += len(out)
+        self._pos += len(out)
         return out
 
     def readline(self, size=None):
-        if self.pos >= self.length:
+        if self._pos >= self.length:
             return ''
         if size:
-            amount = min(size, (self.length - self.pos))
+            amount = min(size, (self.length - self._pos))
         else:
-            amount = self.length - self.pos
+            amount = self.length - self._pos
         out = self.stream.readline(amount)
-        self.pos += len(out)
+        self._pos += len(out)
         return out
 
     def skip(self):
         self.stream.seek(self.bytes_remaining(), os.SEEK_CUR)
-        self.pos = self.length
+        self._pos = self.length
 
     def bytes_remaining(self):
-        return self.length - self.pos
+        return self.length - self._pos
 
 class Reader(object):
-    def __init__(self, definition, stream):
-        self.header = definition[0]
-        self.definition = definition[1]
+    __slots__ = ('message', 'stream', '_pos', '_data', '_peek')
+    def __init__(self, message, stream):
+        self.message = message
         self.stream = stream
         self._pos = -1
         self._data = None
+        self._peek = None
 
-    def _check(self, fieldname, peek):
-        defn = self.definition[self._pos]
-        name, typenames = defn
-        if name != fieldname:
-            raise ValueError('Attempting to access field "%s", but should be "%s"' % (fieldname, name))
-        typename = RPREFIX[peek]
-        if typename in typenames:
-            return typename
-        raise ValueError('%s does not match message spec "%s"' % (peek, defn))
+    def _check(self, fieldname):
+        pos = max(0, self._pos)
+        field = self.message.fields[pos]
+        if field.name != fieldname:
+            raise SendlibError(
+                'Attempting to access field "%s", but should be "%s"' %
+                (fieldname, field.name))
+        try:
+            type = RPREFIX[self._peek]
+        except KeyError:
+            raise SendlibError('unknown field prefix "%s"' % self._peek)
+        if type in field.types:
+            return type
+        raise SendlibError(
+            'field type "%s" incorrect for field %s' % (type, field))
 
     def _read_str(self):
         length = self._read_int()
@@ -231,18 +245,19 @@ class Reader(object):
 
     def read(self, fieldname):
         if self._pos == -1:
-            if PREFIX['message'] != self.stream.read(1):
-                raise ValueError('Invalid message format')
-            if PREFIX['str'] != self.stream.read(1):
-                raise ValueError('Invalid message format')
-            message = self._read_str()
-            if PREFIX['int'] != self.stream.read(1):
-                raise ValueError('Invalid message format')
-            version = self._read_int()
-            if message != self.header[0] or version != self.header[1]:
-                raise ValueError('Reader for (%s, %d) cannot read message of type (%s, %d)' % (
-                    repr(self.header[0]), self.header[1], message, version))
             self._pos = 0
+            if PREFIX['message'] != self.stream.read(1):
+                raise SendlibError('Invalid message format')
+            if PREFIX['str'] != self.stream.read(1):
+                raise SendlibError('Invalid message format')
+            name = self._read_str()
+            if PREFIX['int'] != self.stream.read(1):
+                raise SendlibError('Invalid message format')
+            version = self._read_int()
+            if name != self.message.name or version != self.message.version:
+                raise SendlibError(
+                    'Reader for %s cannot read message of type (%s, %d)'
+                    % (self.message, name, version))
 
         if self._data is not None:
             if self._data.bytes_remaining() == 0:
@@ -250,27 +265,88 @@ class Reader(object):
             else:
                 raise Exception('cannot read field, cursor still on data')
 
-        peek = self.stream.read(1)
-        typename = self._check(fieldname, peek)
+        if self._peek is None:
+            self._peek = self.stream.read(1)
+        typename = self._check(fieldname)
         reader = getattr(self, '_read_' + typename)
         value = reader()
         self._pos += 1
+        self._peek = None
         return value
 
+_or = re.compile('\s*or\s*')
+class Field(object):
+    """
+    Field contains the definition of a single field. ``name`` is
+    the expected field name, and ``types`` is a tuple of valid
+    type names for the field.
+
+    >>> f = Field('foo', 'str or nil')
+    >>> f.name
+    'foo'
+    >>> f.types
+    ('str', 'nil')
+    """
+
+    __slots__ = ('name', 'types')
+    def __init__(self, name, types):
+        self.name = name
+        self.types = tuple(_or.split(types))
+        for type in self.types:
+            if type not in PREFIX:
+                raise ParseError('unknown field type "%s"' % type)
+
+    def __repr__(self):
+        return 'Field(%s, %s)' % (repr(self.name), self.types)
+
 class Message(object):
-    def __init__(self, definition):
-        self.definition = definition
+    """
+    Message encapsulates the definition of a single message.
+    ``name`` is the message name, ``version`` is the message
+    version, and ``fields`` is a tuple of :class:`Field`
+    objects for each field.
+
+    >>> m = Message('foo', 1, (('i', 'int'), ('sn', 'str or nil')))
+    >>> m.name
+    'foo'
+    >>> m.version
+    1
+    >>> m.fields
+    (Field('i', ('int', )), Field('sn', ('str', 'nil')))
+    """
+
+    __slots__ = ('name', 'version', 'fields')
+    def __init__(self, name, version, fields):
+        self.name = name
+        self.version = version
+
+        field_names = set()
+        for n, d in fields:
+            if n in field_names:
+                raise ParseError('duplicate field name "%s"' % n)
+            field_names.add(n)
+        self.fields = tuple(Field(n, d) for n, d in fields)
 
     def reader(self, in_stream):
-        return Reader(self.definition, in_stream)
+        """
+        Return a :class:`Reader` object which reads messages of
+        this format from ``in_stream``. ``in_stream`` must have
+        a ``read(size)`` method.
+        """
+        return Reader(self, in_stream)
 
     def writer(self, out_stream):
-        return Writer(self.definition, out_stream)
+        """
+        Return a :class:`Writer` object which writes messages of
+        this format to ``out_stream``. ``out_stream`` must have
+        a ``write(str)`` method.
+        """
+        return Writer(self, out_stream)
+
 
 def parse(definition_str):
     message = re.compile(r'^\((\w+),\s*(\d+)\):$')
     field = re.compile(r'^-\s*([^:]+):\s+(.+)$')
-    _or = re.compile('\s*or\s*')
 
     messages = {}
     curr = None
@@ -284,18 +360,18 @@ def parse(definition_str):
             # new message definition
             name, vers = m.group(1), int(m.group(2))
             if (name, vers) in messages:
-                raise Exception('Message (%s, %d) already defined' % (name, vers))
+                raise ParseError('Duplicate message (%s, %d)' % (name, vers))
             curr = messages[(name, vers)] = []
             continue
 
         f = field.match(line)
         if f:
-            fieldname = f.group(1)
-            typenames = _or.split(f.group(2))
-            curr.append((fieldname, typenames))
+            name = f.group(1)
+            type = f.group(2)
+            curr.append((name, type))
 
-    for key in messages:
-        messages[key] = Message((key, messages[key]))
+    for (name, version), fields in messages.iteritems():
+        messages[(name, version)] = Message(name, version, fields)
 
     return messages
 
