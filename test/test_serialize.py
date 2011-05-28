@@ -237,6 +237,81 @@ class SerializationTest(unittest.TestCase):
         self.assertRaises(sendlib.SendlibError, reader.read, 'bar')
         self.assertEqual('BAZ', reader.read('baz'))
 
+    def test_nested_message(self):
+        definition = """
+        (foo, 1):
+         - bar: str
+         - baz: str
+
+        (baz, 1):
+         - foo: msg (foo, 1)
+        """
+        registry = sendlib.parse(definition)
+
+        baz = registry.get_message('baz')
+        buf = StringIO()
+        writer = baz.writer(buf)
+        foowriter = writer.write('foo')
+        foowriter.write('bar', 'hello')
+        foowriter.write('baz', 'world')
+
+        expected = 'MS\x00\x00\x00\x03bazI\x00\x00\x00\x01MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x05helloS\x00\x00\x00\x05world'
+        self.assertEqual(expected, buf.getvalue())
+
+    def test_nested_message_with_or(self):
+        definition = """
+        (foo, 1):
+         - a: str
+         - b: str
+
+        (bar, 1):
+         - c: int
+         - d: int
+
+        (baz, 1):
+         - m: msg(foo, 1) or msg(bar, 1)
+        """
+        registry = sendlib.parse(definition)
+
+        baz = registry.get_message('baz')
+        buf = StringIO()
+        writer = baz.writer(buf)
+        foowriter = writer.write('m', registry.get_message('foo'))
+        foowriter.write('a', 'hello')
+        foowriter.write('b', 'world')
+
+        expected = 'MS\x00\x00\x00\x03bazI\x00\x00\x00\x01MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x05helloS\x00\x00\x00\x05world'
+        self.assertEqual(expected, buf.getvalue())
+
+    def test_nested_message_or_nil(self):
+        definition = """
+        (foo, 1):
+         - a: str
+         - b: str
+
+        (bar, 1):
+         - m: msg(foo, 1) or nil
+        """
+        registry = sendlib.parse(definition)
+
+        bar = registry.get_message('bar')
+        buf = StringIO()
+        writer = bar.writer(buf)
+        foowriter = writer.write('m', registry.get_message('foo'))
+        foowriter.write('a', 'hello')
+        foowriter.write('b', 'world')
+
+        expected = 'MS\x00\x00\x00\x03barI\x00\x00\x00\x01MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x05helloS\x00\x00\x00\x05world'
+        self.assertEqual(expected, buf.getvalue())
+
+
+        buf = StringIO()
+        writer = bar.writer(buf)
+        foowriter = writer.write('m', None)
+
+        expected = 'MS\x00\x00\x00\x03barI\x00\x00\x00\x01N'
+        self.assertEqual(expected, buf.getvalue())
+
 if __name__ == '__main__':
     unittest.main()
 

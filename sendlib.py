@@ -53,6 +53,9 @@ RPREFIX = dict((v, k) for k, v in PREFIX.items())
 class SendlibError(Exception): pass
 class ParseError(SendlibError): pass
 
+# a special marker, distinct from None
+Nothing = type('Nothing', (), {})()
+
 class Writer(object):
     __slots__ = ('message', 'stream', '_pos')
     def __init__(self, message, stream):
@@ -93,6 +96,8 @@ class Writer(object):
         field = self.message.fields[pos]
         if fieldname != field.name:
             if 'nil' in field.types:
+                # FIXME: this is shady, a method named
+                # _check should not write anything
                 self._write_nil(None)
                 self._pos += 1
                 return self._check(fieldname, value)
@@ -100,12 +105,16 @@ class Writer(object):
                 'Attempting to access field "%s", but should be "%s"' %
                 (fieldname, field.name))
         for type in field.types:
+            if isinstance(type, Message):
+                if value is Nothing or value == type:
+                    return 'msg'
+                continue
             checker = getattr(self, '_check_' + type)
             result = checker(value)
             if result:
                 return type
         raise SendlibError(
-            '%s does not match message spec "%s"' % (value, defn))
+            '%s does not match message spec "%s"' % (repr(value), field.spec))
 
     def _write_str(self, value):
         value = codecs.encode(value, 'utf-8')
@@ -144,7 +153,18 @@ class Writer(object):
             self.stream.write(buf)
             sofar += len(buf)
 
-    def write(self, fieldname, value):
+    def _write_msg(self, value):
+        field = self.message.fields[self._pos]
+        if value is Nothing:
+            # assume exactly one Message in types
+            message = tuple(t for t in field.types if isinstance(t, Message))[0]
+        else:
+            # value will be a Message instance
+            message = tuple(t for t in field.types if value == t)[0]
+        writer = message.writer(self.stream)
+        return writer
+
+    def write(self, fieldname, value=Nothing):
         type = self._check(fieldname, value)
         if self._pos == -1:
             # write header
@@ -154,8 +174,9 @@ class Writer(object):
             self._pos = 0
 
         writer = getattr(self, '_write_' + type)
-        writer(value)
+        out = writer(value)
         self._pos += 1
+        return out
 
 class Data(object):
     __slots__ = ('length', 'stream', '_pos')
@@ -274,7 +295,8 @@ class Reader(object):
         self._peek = None
         return value
 
-_or = re.compile('\s*or\s*')
+_or = re.compile(r'\s*or\s*')
+_msg = re.compile(r'msg\s*\(\s*(\w+),\s*(\d+)\s*\)')
 class Field(object):
     """
     Field contains the definition of a single field. ``name`` is
@@ -288,13 +310,29 @@ class Field(object):
     ('str', 'nil')
     """
 
-    __slots__ = ('name', 'types')
-    def __init__(self, name, types):
+    __slots__ = ('message', 'name', 'types', 'spec')
+    def __init__(self, message, name, types):
+        self.message = message
         self.name = name
-        self.types = tuple(_or.split(types))
-        for type in self.types:
-            if type not in PREFIX:
+        self.spec = types
+        self.types = []
+        for type in tuple(_or.split(types)):
+            msgref = _msg.match(type)
+            if msgref:
+                submsg = self.message.registry.get_message(
+                    msgref.group(1),
+                    int(msgref.group(2))
+                )
+                if not submsg:
+                    raise ParseError(
+                        'unknown referenced message "%s"' %
+                        (msgref.group(1), int(msgref.group(2))))
+                self.types.append(submsg)
+            elif type not in PREFIX:
                 raise ParseError('unknown field type "%s"' % type)
+            else:
+                self.types.append(type)
+        self.types = tuple(self.types)
 
     def __repr__(self):
         return 'Field(%s, %s)' % (repr(self.name), self.types)
@@ -315,17 +353,12 @@ class Message(object):
     (Field('i', ('int', )), Field('sn', ('str', 'nil')))
     """
 
-    __slots__ = ('name', 'version', 'fields')
-    def __init__(self, name, version, fields):
+    __slots__ = ('registry', 'name', 'version', 'fields')
+    def __init__(self, registry, name, version, fields):
+        self.registry = registry
         self.name = name
         self.version = version
-
-        field_names = set()
-        for n, d in fields:
-            if n in field_names:
-                raise ParseError('duplicate field name "%s"' % n)
-            field_names.add(n)
-        self.fields = tuple(Field(n, d) for n, d in fields)
+        self.fields = fields
 
     def reader(self, in_stream):
         """
@@ -344,15 +377,68 @@ class Message(object):
         return Writer(self, out_stream)
 
 
+class MessageRegistry(object):
+    """
+    A :class:`MessageRegistry` contains the result of a call to
+    :func:`parse`, and is the main interface for receiving and
+    sending messages.
+
+    Messages can be retrieved programmatically from the :class:
+    `MessageRegistry` by dict-like access (using the ``[]``
+    operator), or by ``name`` and ``version`` using :meth:
+    `get_message`.
+    """
+
+    __slots__ = ('messages', )
+    def __init__(self, messages):
+        self.messages = messages
+
+    def __getitem__(self, key):
+        """
+        Retrieve the :class:`Message` whose name and version match
+        the given key. ``key`` is a tuple of ``(name, version)``.
+        Raises :class:`KeyError` if no such message exists.
+        """
+        return self.messages[key]
+
+    def get_message(self, name, version=1):
+        """
+        Retrieve the :class:`Message` whose name and version match
+        ``name`` and ``version``, or return ``None`` if no such
+        message exists.
+        """
+        try:
+            return self[(name, version)]
+        except KeyError:
+            return None
+
 def parse(definition_str):
     message = re.compile(r'^\((\w+),\s*(\d+)\):$')
     field = re.compile(r'^-\s*([^:]+):\s+(.+)$')
 
-    messages = {}
+    registry = MessageRegistry({})
+    messages = registry.messages
     curr = None
-    for line in definition_str.split('\n'):
+    names = None
+    for lineno, line in enumerate(definition_str.split('\n')):
         line = line.strip()
         if line == '' or line.startswith('#'):
+            continue
+
+        f = field.match(line)
+        if f:
+            if curr is None:
+                raise ParseError(
+                    'field definition outside of message at line %d' % lineno)
+            name = f.group(1)
+            type = f.group(2)
+            if name not in names:
+                f = Field(curr, name, type)
+                curr.fields.append(f)
+                names.add(name)
+            else:
+                raise ParseError(
+                    'duplicate field name "%s" at line %d' % (name, lineno))
             continue
 
         m = message.match(line)
@@ -361,18 +447,13 @@ def parse(definition_str):
             name, vers = m.group(1), int(m.group(2))
             if (name, vers) in messages:
                 raise ParseError('Duplicate message (%s, %d)' % (name, vers))
-            curr = messages[(name, vers)] = []
+            curr = messages[(name, vers)] = Message(registry, name, vers, [])
+            names = set()
             continue
 
-        f = field.match(line)
-        if f:
-            name = f.group(1)
-            type = f.group(2)
-            curr.append((name, type))
+    for message in registry.messages.values():
+        message.fields = tuple(message.fields)
 
-    for (name, version), fields in messages.iteritems():
-        messages[(name, version)] = Message(name, version, fields)
-
-    return messages
+    return registry
 
 

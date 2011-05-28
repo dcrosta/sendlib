@@ -14,11 +14,11 @@ class ParserTest(unittest.TestCase):
        (foo, 1):
        """
 
-       msgs = sendlib.parse(definition)
-       self.assertEqual(1, len(msgs))
+       registry = sendlib.parse(definition)
+       self.assertEqual(1, len(registry.messages))
 
-       expected = sendlib.Message('foo', 1, [])
-       actual = msgs[('foo', 1)]
+       expected = sendlib.Message(registry, 'foo', 1, ())
+       actual = registry[('foo', 1)]
        self.assertEqual(expected.name, actual.name)
        self.assertEqual(expected.version, actual.version)
        self.assertEqual(expected.fields, actual.fields)
@@ -82,6 +82,42 @@ class ParserTest(unittest.TestCase):
         """
         self.assertRaises(sendlib.ParseError, sendlib.parse, definition)
 
+    def test_nested_message(self):
+        definition = """
+        (foo, 1):
+         - bar: str
+         - baz: str
+
+        (baz, 1):
+         - foo: msg (foo, 1)
+        """
+        registry = sendlib.parse(definition)
+
+    def test_nested_message_with_or(self):
+        definition = """
+        (foo, 1):
+         - a: str
+         - b: str
+
+        (bar, 1):
+         - c: int
+         - d: int
+
+        (baz, 1):
+         - m: msg(foo, 1) or msg(bar, 1)
+        """
+        registry = sendlib.parse(definition)
+
+    def test_nested_message_or_nil(self):
+        definition = """
+        (foo, 1):
+         - a: str
+         - b: str
+
+        (bar, 1):
+         - m: msg(foo, 1) or nil
+        """
+        registry = sendlib.parse(definition)
 
 if __name__ == '__main__':
     unittest.main()
