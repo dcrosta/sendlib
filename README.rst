@@ -109,12 +109,6 @@ followed by a serialized ``str`` (the message name) and a serialized ``int``
 License and Credits
 -------------------
 
-``sendlib`` is by Daniel Crosta <dcrosta@late.am> and is available at
-http://github.com/dcrosta/sendlib.
-
-``sendlib`` is licensed under a BSD-like license:
-
-
 Copyright (c) 2011, Daniel Crosta <dcrosta@late.am>.
 All rights reserved.
 
