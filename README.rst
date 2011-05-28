@@ -10,6 +10,17 @@ often used (like JSON_, YAML_, or XML_).
 .. _YAML: http://yaml.org/
 .. _XML: http://www.w3.org/standards/xml/
 
+Why not JSON, YAML, or XML? ``sendlib`` natively supports reading messages
+one piece at a time, to keep memory footprint small, and has native support
+for sending and receiving file-like objects with the ``data`` type.
+
+If your application needs to send and receive large data blobs, especially
+if your application can process that data without random access, ``sendlib``
+may be a good fit to reduce memory usage. On the other hand, if you need
+random access to fields within your message, have small messages, or have
+messages with, or complex nesting structures, then ``sendlib`` may not be
+for you.
+
 
 Design Objectives
 -----------------
