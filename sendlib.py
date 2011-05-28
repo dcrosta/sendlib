@@ -31,7 +31,8 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 """
 
-__all__ = ('parse', )
+__version__ = '0.2'
+__all__ = ('parse', '__version__')
 
 import codecs
 import os

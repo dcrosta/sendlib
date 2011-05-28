@@ -1,14 +1,12 @@
 from setuptools import setup, find_packages
 
-import os
-here = os.path.abspath(os.path.dirname(__file__))
-README = file(os.path.join(here, 'README.rst')).read()
+from sendlib import __version__
 
 setup(
     name='sendlib',
-    version='0.2',
+    version=__version__,
     description='sendlib  is a lightweight message serialization library which aims to be memory efficient',
-    long_description=README,
+    long_description=file('README.rst').read(),
     classifiers=[
         'Programming Language :: Python',
         'Programming Language :: Python :: 2.6',
