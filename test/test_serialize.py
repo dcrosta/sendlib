@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import string
 from StringIO import StringIO
 import unittest
 
@@ -55,6 +54,34 @@ class SerializationTest(unittest.TestCase):
         expected = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01S\x00\x00\x00\x03BARNS\x00\x00\x00\x03QUX'
         self.assertEqual(expected, buf.getvalue())
 
+    def test_fields_write_in_order(self):
+        definition = """
+        (foo, 1):
+          - bar: str
+          - baz: str
+          - qux: str
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        writer = foo.writer(StringIO())
+        writer.write('bar', '')
+        self.assertRaises(sendlib.SendlibError, writer.write, 'qux', '')
+
+    def test_write_past_end(self):
+        definition = """
+        (foo, 1):
+          - bar: str
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        writer = foo.writer(StringIO())
+        writer.write('bar', '')
+        self.assertRaises(sendlib.SendlibError, writer.write, 'baz', '')
+
     def test_write_then_read(self):
         definition = """
         (auth, 1):
@@ -72,60 +99,6 @@ class SerializationTest(unittest.TestCase):
         reader = msgs[('auth', 1)].reader(buf)
         self.assertEqual('dcrosta', reader.read('username'))
         self.assertEqual('abc123', reader.read('password'))
-
-    def test_write_data(self):
-        definition = """
-        (msg, 1):
-          - data: data
-        (msg, 2):
-          - data: data
-          - after: str
-        """
-        msgs = sendlib.parse(definition)
-        msg = msgs[('msg', 1)]
-
-        # about a megabyte of data
-        mydata = StringIO()
-        for i in xrange(16900):
-            mydata.write(string.letters + string.digits + '\n')
-        mydata.seek(0, 0)
-
-        buf = StringIO()
-        writer = msg.writer(buf)
-        writer.write('data', mydata)
-
-        buf.seek(0, 0)
-        reader = msg.reader(buf)
-        data_fp = reader.read('data')
-
-        read_data = []
-        sofar = 0
-        while True:
-            out = data_fp.read(256 * 1024)
-            if out == '':
-                break
-            sofar += len(out)
-            read_data.append(out)
-
-        mydata.seek(0, 0)
-        self.assertEqual(len(mydata.getvalue()), len(''.join(read_data)))
-        self.assertEqual(mydata.getvalue(), ''.join(read_data))
-
-        msg = msgs[('msg', 2)]
-        buf = StringIO()
-        writer = msg.writer(buf)
-        mydata.seek(0, 0)
-        writer.write('data', mydata)
-        writer.write('after', 'hello, world')
-
-        buf.seek(0, 0)
-        reader = msg.reader(buf)
-        data_fp = reader.read('data')
-        data_fp.read(1024)
-
-        self.assertRaises(Exception, reader.read, 'after')
-        data_fp.skip()
-        self.assertEqual('hello, world', reader.read('after'))
 
     def test_unicode(self):
         description = """
@@ -195,6 +168,21 @@ class SerializationTest(unittest.TestCase):
 
         buf.seek(0, 0)
         self.assertFalse(msg.reader(buf).read('bar'))
+
+    def test_nil(self):
+        description = """
+        (foo, 1):
+          - bar: nil
+        """
+
+        msgs = sendlib.parse(description)
+        msg = msgs[('foo', 1)]
+
+        buf = StringIO()
+        msg.writer(buf).write('bar', None)
+
+        buf.seek(0, 0)
+        self.assertEqual(None, msg.reader(buf).read('bar'))
 
     def test_read_wrong_message(self):
         definition = """
@@ -311,6 +299,73 @@ class SerializationTest(unittest.TestCase):
 
         expected = 'MS\x00\x00\x00\x03barI\x00\x00\x00\x01N'
         self.assertEqual(expected, buf.getvalue())
+
+    def test_fails_on_invalid_prefix(self):
+        definition = """
+        (foo, 1):
+         - a: int
+        """
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        serialized = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01QI\x00\x00\x00\x01'
+        reader = foo.reader(StringIO(serialized))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'a')
+
+    def test_wrong_type(self):
+        definition = """
+        (foo, 1):
+         - a: str
+        """
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        serialized = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01I\x00\x00\x00\x01'
+        reader = foo.reader(StringIO(serialized))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'a')
+
+    def test_invalid_header(self):
+        definition = """
+        (foo, 1):
+         - a: str
+        """
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        serialized = 'XS\x00\x00\x00\x03fooI\x00\x00\x00\x01I\x00\x00\x00\x01'
+        reader = foo.reader(StringIO(serialized))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'a')
+
+        serialized = 'MX\x00\x00\x00\x03fooI\x00\x00\x00\x01I\x00\x00\x00\x01'
+        reader = foo.reader(StringIO(serialized))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'a')
+
+        serialized = 'MS\x00\x00\x00\x03fooX\x00\x00\x00\x01I\x00\x00\x00\x01'
+        reader = foo.reader(StringIO(serialized))
+        self.assertRaises(sendlib.SendlibError, reader.read, 'a')
+
+    def test_flush(self):
+        class MockStream(object):
+            def __init__(self):
+                self.is_flushed = False
+            def write(self, data): pass
+            def flush(self):
+                self.is_flushed = True
+
+        definition = """
+        (foo, 1):
+         - a: str
+        """
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        stream = MockStream()
+        writer = foo.writer(stream)
+        writer.write('a', 'blah')
+        writer.flush()
+
+        self.assertTrue(stream.is_flushed)
+
 
 if __name__ == '__main__':
     unittest.main()

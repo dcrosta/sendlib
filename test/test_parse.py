@@ -23,6 +23,16 @@ class ParserTest(unittest.TestCase):
        self.assertEqual(expected.version, actual.version)
        self.assertEqual(expected.fields, actual.fields)
 
+    def test_registry(self):
+        definition = """
+        (foo, 1):
+         - a: str
+        """
+
+        registry = sendlib.parse(definition)
+        self.assertTrue(bool(registry[('foo', 1)]))
+        self.assertRaises(KeyError, lambda: registry[('FOO', 1)])
+
     def test_field_types(self):
         definition = """
         (foo, 1):
@@ -118,6 +128,25 @@ class ParserTest(unittest.TestCase):
          - m: msg(foo, 1) or nil
         """
         registry = sendlib.parse(definition)
+
+    def test_unknown_nested_message(self):
+        definition = """
+        (foo, 1):
+         - a: str
+         - b: str
+
+        (bar, 1):
+         - m: msg (FOO, 1)
+        """
+        self.assertRaises(sendlib.ParseError, sendlib.parse, definition)
+
+    def test_orphan_field(self):
+        definition = """
+         - a: str
+        (foo, 1):
+         - b: str
+        """
+        self.assertRaises(sendlib.ParseError, sendlib.parse, definition)
 
 if __name__ == '__main__':
     unittest.main()
