@@ -47,6 +47,7 @@ PREFIX = {
     'message': 'M',
 }
 RPREFIX = dict((v, k) for k, v in PREFIX.items())
+LIST_PREFIX = 'L'
 
 class SendlibError(Exception): pass
 class ParseError(SendlibError): pass
@@ -56,6 +57,13 @@ class Nothing(object):
     def __repr__(self):
         return 'Nothing'
 Nothing = Nothing()
+
+def typename(obj):
+    if obj is None:
+        return 'nil'
+    elif isinstance(obj, Message):
+        return 'msg (%s, %d)' % (obj.name, obj.version)
+    return str(type(obj).__name__)
 
 class Writer(object):
     """
@@ -117,17 +125,78 @@ class Writer(object):
             raise SendlibError(
                 'Attempting to access field "%s", but should be "%s"' %
                 (fieldname, field.name))
-        for type in field.types:
-            if isinstance(type, Message):
-                if value is Nothing or value == type:
-                    return 'msg'
+        if type(value) in (tuple, list):
+            return self._check_list(field, value)
+        elif value == Nothing or \
+             type(value) in (str, unicode) and _msg.match(value) or \
+             isinstance(value, Message):
+            return self._check_msg(field, value)
+        for type_name in field.types:
+            if _msg.match(type_name):
                 continue
-            checker = getattr(self, '_check_' + type)
+            if _many.match(type_name):
+                continue
+            checker = getattr(self, '_check_' + type_name)
             result = checker(value)
             if result:
-                return type
+                return type_name
         raise SendlibError(
-            '%s does not match message spec "%s"' % (repr(value), field.spec))
+            '%s does not match field spec "%s"' % (repr(value), field.spec))
+
+    def _check_list(self, field, sequence):
+        # make sure the sequence has all
+        # of the same type
+        if len(sequence) == 0:
+            return 'list'
+        types_found = set()
+        for item in sequence:
+            types_found.add(typename(item))
+        if len(types_found) > 1:
+            raise SendlibError(
+                'sequence arguments to write must contain elements of '
+                'compatible types, found %s' % list(types_found))
+        inner_type = types_found.pop()
+        many_type = 'many ' + inner_type
+
+        for type_name in field.types:
+            if not _many.match(type_name):
+                continue
+            if many_type == type_name:
+                return 'list'
+        # not sure we can get here
+        raise SendlibError(
+            '%s does not match field spec "%s"' % (repr(sequence), field.spec))
+
+    def _check_msg(self, field, value):
+        # ensure that value is one of the messages,
+        # or if value is Nothing, that there's only
+        # one message type for this field
+        if isinstance(value, Message):
+            value = 'msg (%s, %s)' % (value.name, value.version)
+        if type(value) in (str, unicode):
+            m = _msg.match(value)
+            if not m:
+                raise SendlibError('value should be (message_name, version)')
+            msg = self.message.registry.get_message(
+                m.group(1), int(m.group(2)))
+            if not msg:
+                raise SendlibError(
+                    'unknown message (%s, %s)' % (m.group(1), m.group(2)))
+            type_name = 'msg (%s, %s)' % (m.group(1), m.group(2))
+            if type_name not in field.types:
+                raise SendlibError(
+                    'message (%s, %s) not valid for field %s' %
+                    (m.group(1), m.group(2)), field.name)
+            return 'msg'
+        elif value == Nothing:
+            num = len([t for t in field.types if _msg.match(t)])
+            if num == 0:
+                raise SendlibError(
+                    'messages not valid for field %s' % field.name)
+            elif num > 1:
+                raise SendlibError(
+                    'more than one message valid for field %s' % field.name)
+            return 'msg'
 
     def _write_str(self, value):
         value = codecs.encode(value, 'utf-8')
@@ -168,14 +237,36 @@ class Writer(object):
 
     def _write_msg(self, value):
         field = self.message.fields[self._pos]
-        if value is Nothing:
+        if isinstance(value, Message):
+            value = 'msg (%s, %s)' % (value.name, value.version)
+        if type(value) in (str, unicode):
+            m = _msg.match(value)
+            message = self.message.registry.get_message(
+                m.group(1), int(m.group(2)))
+        elif value is Nothing:
             # assume exactly one Message in types
-            message = tuple(t for t in field.types if isinstance(t, Message))[0]
-        else:
-            # value will be a Message instance
-            message = tuple(t for t in field.types if value == t)[0]
+            m = tuple(t for t in field.types if _msg.match(t))[0]
+            m = _msg.match(m)
+            message = self.message.registry.get_message(
+                m.group(1), int(m.group(2)))
         writer = message.writer(self.stream)
         return writer
+
+    def _write_list(self, value):
+        self.stream.write('L')
+        self.stream.write(struct.pack('>L', len(value)))
+        if len(value):
+            inner_type = typename(value[0])
+            if _msg.match(inner_type):
+                writer = self._write_msg
+            else:
+                writer = getattr(self, '_write_' + inner_type)
+            out = []
+            for item in value:
+                out.append(writer(item))
+            return tuple(out)
+        else:
+            return ()
 
     def write(self, fieldname, value=Nothing):
         """
@@ -184,6 +275,10 @@ class Writer(object):
         format. `value` defaults to :class:`Nothing`, which is
         distinct from :class:`None`, as :class:`None` is a valid
         value which may be written (when a field is ``or nil``).
+
+        When writing ``many`` fields, `value` should be a list
+        or tuple; if not, the single value will be written for
+        the field and future writes to that field will fail.
 
         If a field other than `fieldname` should be written,
         unless all preceding unwritten fields are ``or nil``,
@@ -384,6 +479,7 @@ class Reader(object):
 
 _or = re.compile(r'\s*or\s*')
 _msg = re.compile(r'msg\s*\(\s*(\w+),\s*(\d+)\s*\)')
+_many = re.compile(r'many\s+(.+?)\s*$')
 class Field(object):
     """
     :class:`Field` contains the definition of a single field.
@@ -410,6 +506,12 @@ class Field(object):
         self.spec = types
         self.types = []
         for type in _or.split(types):
+            do_many = False
+            many = _many.match(type)
+            if many:
+                type = many.group(1)
+                do_many = True
+
             msgref = _msg.match(type)
             if msgref:
                 submsg = self.message.registry.get_message(
@@ -420,9 +522,13 @@ class Field(object):
                     raise ParseError(
                         'unknown referenced message "%s"' %
                         repr((msgref.group(1), int(msgref.group(2)))))
-                self.types.append(submsg)
+
+                type = 'msg (%s, %d)' % (submsg.name, submsg.version)
             elif type not in PREFIX:
                 raise ParseError('unknown field type "%s"' % type)
+
+            if do_many:
+                self.types.append('many ' + type)
             else:
                 self.types.append(type)
         self.types = tuple(self.types)
@@ -460,6 +566,17 @@ class Message(object):
         self.name = name
         self.version = version
         self.fields = fields
+
+    def __repr__(self):
+        return 'Message(%s, %s, %s)' % (repr(self.name),
+                                        self.version,
+                                        self.fields)
+
+    def __eq__(self, other):
+        return isinstance(other, Message) and \
+               self.registry == other.registry and \
+               self.name == other.name and \
+               self.version == other.version
 
     def reader(self, in_stream):
         """
@@ -517,8 +634,8 @@ def parse(schema):
         # assume it is file-like
         schema = schema.read()
 
-    message = re.compile(r'^\((\w+),\s*(\d+)\):$')
-    field = re.compile(r'^-\s*([^:]+):\s+(.+)$')
+    message = re.compile(r'^\(([^,]+),\s*(\d+)\):\s*$')
+    field = re.compile(r'^-\s*([^:]+):\s+(.+?)\s*$')
 
     registry = MessageRegistry({})
     messages = registry.messages
@@ -526,7 +643,9 @@ def parse(schema):
     names = None
     for lineno, line in enumerate(schema.split('\n')):
         line = line.strip()
-        if line == '' or line.startswith('#'):
+        if '#' in line:
+            line = line[:line.index('#')]
+        if line == '':
             continue
 
         f = field.match(line)

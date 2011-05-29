@@ -366,6 +366,105 @@ class SerializationTest(unittest.TestCase):
 
         self.assertTrue(stream.is_flushed)
 
+    def test_many(self):
+        definition = """
+        (foo, 1):
+         - a: many str
+         - b: str
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        buf = StringIO()
+        writer = foo.writer(buf)
+        writer.write('a', ['hello', 'world'])
+        writer.write('b', 'goodbye')
+
+        expected = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01L\x00\x00\x00\x02S\x00\x00\x00\x05helloS\x00\x00\x00\x05worldS\x00\x00\x00\x07goodbye'
+        self.assertEqual(expected, buf.getvalue())
+
+
+        buf = StringIO()
+        writer = foo.writer(buf)
+        writer.write('a', [])
+        writer.write('b', 'goodbye')
+
+        expected = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01L\x00\x00\x00\x00S\x00\x00\x00\x07goodbye'
+        self.assertEqual(expected, buf.getvalue())
+
+
+        buf = StringIO()
+        writer = foo.writer(buf)
+        self.assertRaises(sendlib.SendlibError, writer.write, 'a', ['hello', 1])
+
+    def test_many_or_nil(self):
+        definition = """
+        (foo, 1):
+         - a: many str or nil
+         - b: str
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        buf = StringIO()
+        writer = foo.writer(buf)
+        writer.write('a', None)
+        writer.write('b', 'goodbye')
+
+        expected = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01NS\x00\x00\x00\x07goodbye'
+        self.assertEqual(expected, buf.getvalue())
+
+    def test_many_nil(self):
+        definition = """
+        (foo, 1):
+         - a: many nil
+         - b: str
+        """
+
+        msgs = sendlib.parse(definition)
+        foo = msgs[('foo', 1)]
+
+        buf = StringIO()
+        writer = foo.writer(buf)
+        writer.write('a', [None, None])
+        writer.write('b', 'goodbye')
+
+        expected = 'MS\x00\x00\x00\x03fooI\x00\x00\x00\x01L\x00\x00\x00\x02NNS\x00\x00\x00\x07goodbye'
+        self.assertEqual(expected, buf.getvalue())
+
+    def test_many_nested_message(self):
+        definition = """
+        (file, 1):
+         - filename: str
+         - data: data
+
+        (files, 1):
+         - files: many msg (file, 1)
+        """
+
+        msgs = sendlib.parse(definition)
+        files = msgs[('files', 1)]
+
+        buf = StringIO()
+        writer = files.writer(buf)
+
+        sub_files = [msgs.get_message('file')] * 2
+
+        for i, filewriter in enumerate(writer.write('files', sub_files)):
+            data = StringIO(str(i))
+            filename = 'f%d' % i
+            filewriter.write('filename', filename)
+            filewriter.write('data', data)
+
+        expected = 'MS\x00\x00\x00\x05filesI\x00\x00\x00\x01L\x00\x00\x00\x02'
+        expected += 'MS\x00\x00\x00\x04fileI\x00\x00\x00\x01S\x00\x00\x00\x02f0D\x00\x00\x00\x010'
+        expected += 'MS\x00\x00\x00\x04fileI\x00\x00\x00\x01S\x00\x00\x00\x02f1D\x00\x00\x00\x011'
+
+        self.assertEqual(expected, buf.getvalue())
+
+
 
 if __name__ == '__main__':
     unittest.main()
