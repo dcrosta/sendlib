@@ -1,6 +1,24 @@
 from setuptools import setup, find_packages
+from distutils.cmd import Command
+import subprocess
+import shutil
+import os
 
 from sendlib import __version__
+
+class doc(Command):
+    description = 'generate documentation'
+    user_options = []
+    boolean_options = []
+
+    def initialize_options(self): pass
+    def finalize_options(self): pass
+
+    def run(self):
+        path = 'doc/_build/%s' % __version__
+        shutil.rmtree(path, ignore_errors=True)
+        os.makedirs(path)
+        subprocess.call(['sphinx-build', '-E', '-b', 'html', 'doc', path])
 
 setup(
     name='sendlib',
@@ -23,5 +41,6 @@ setup(
     py_modules=['sendlib'],
     zip_safe=True,
     test_suite='test',
+    cmdclass={"doc": doc},
 )
 
