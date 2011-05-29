@@ -1,2 +1,3 @@
 include *.rst
+recursive-include doc/ *.py *.rst
 prune sendlib.egg-info
