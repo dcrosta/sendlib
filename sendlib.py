@@ -1,35 +1,33 @@
 # -*- coding: utf-8 -*-
 
-"""
-Copyright (c) 2011, Daniel Crosta <dcrosta@late.am>
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-- Redistributions of source code must retain the above copyright notice,
-  this list of conditions and the following disclaimer.
-
-- Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-- Neither the name of the author nor the names of its contributors may be
-  used to endorse or promote products derived from this software without
-  specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-"""
+# Copyright (c) 2011, Daniel Crosta <dcrosta@late.am>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# - Redistributions of source code must retain the above copyright notice,
+#   this list of conditions and the following disclaimer.
+#
+# - Redistributions in binary form must reproduce the above copyright notice,
+#   this list of conditions and the following disclaimer in the documentation
+#   and/or other materials provided with the distribution.
+#
+# - Neither the name of the author nor the names of its contributors may be
+#   used to endorse or promote products derived from this software without
+#   specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
 
 __version__ = '0.2'
 __all__ = ('SendlibError', 'ParseError', 'parse', '__version__')
@@ -54,9 +52,22 @@ class SendlibError(Exception): pass
 class ParseError(SendlibError): pass
 
 # a special marker, distinct from None
-Nothing = type('Nothing', (), {})()
+class Nothing(object):
+    def __repr__(self):
+        return 'Nothing'
+Nothing = Nothing()
 
 class Writer(object):
+    """
+    A :class:`Writer` is bound to a specific stream and
+    :class:`Message`, and maintains internal state for writing
+    a single instance of that message to the stream.
+
+    You ordinarily obtain a :class:`Writer` instance by calling
+    :meth:`Message.writer` on a :class:`Message` instance, not
+    by directly constructing one.
+    """
+
     __slots__ = ('message', 'stream', '_pos')
     def __init__(self, message, stream):
         self.message = message
@@ -167,6 +178,21 @@ class Writer(object):
         return writer
 
     def write(self, fieldname, value=Nothing):
+        """
+        Write the `value` to the stream, after verifying that
+        `fieldname` is the correct next field in the message
+        format. `value` defaults to :class:`Nothing`, which is
+        distinct from :class:`None`, as :class:`None` is a valid
+        value which may be written (when a field is ``or nil``).
+
+        If a field other than `fieldname` should be written,
+        unless all preceding unwritten fields are ``or nil``,
+        raise :class:`SendlibError`.
+
+        Returns :class:`None`, except when writing a nested
+        :class:`Message`, in which case a new
+        :class:`Writer` is returned.
+        """
         type = self._check(fieldname, value)
         if self._pos == -1:
             # write header
@@ -184,6 +210,13 @@ class Writer(object):
         self.stream.flush()
 
 class Data(object):
+    """
+    :class:`Data` is a limited file-like object for reading
+    ``data`` elements from message streams. In particular,
+    it does not support :meth:`seek`, as ``sendblib`` does
+    not require that the underlying stream support full
+    bi-directional seeking.
+    """
     __slots__ = ('length', 'stream', '_pos')
     def __init__(self, length, stream):
         self.length = length
@@ -191,6 +224,12 @@ class Data(object):
         self._pos = 0
 
     def read(self, size=None):
+        """
+        Read at most `size` bytes of data from the underlying
+        stream. If `size` bytes are not available, return as
+        many as are available. If past the end of the stream,
+        return an empty string.
+        """
         if self._pos >= self.length:
             return ''
         if size:
@@ -202,6 +241,15 @@ class Data(object):
         return out
 
     def readline(self, size=None):
+        """
+        Read a line from the stream, including the trailing
+        new line character. If `size` is set, don't read more
+        than `size` bytes, even if the result does not represent
+        a complete line.
+
+        The last line read may not include a trailing new line
+        character if one was not present in the underlying stream.
+        """
         if self._pos >= self.length:
             return ''
         if size:
@@ -213,13 +261,33 @@ class Data(object):
         return out
 
     def skip(self):
+        """
+        Advance the internal pointer to the end of the data
+        area in the stream. This allows the next call to
+        :meth:`Reader.read` to succeed, as though all the
+        data had been read by the application.
+        """
         self.stream.seek(self.bytes_remaining(), os.SEEK_CUR)
         self._pos = self.length
 
     def bytes_remaining(self):
+        """
+        Return the number of bytes remaining.
+        """
         return self.length - self._pos
 
 class Reader(object):
+    """
+    A :class:`Reader` is bound to a specific stream and
+    :class:`Message`, and maintains internal state for
+    reading a single instance of that message from the
+    stream.
+
+    You ordinarily obtain a :class:`Reader` instance by
+    calling :meth:`Message.reader` on a :class:`Message`
+    instance, not by directly constructing one.
+    """
+
     __slots__ = ('message', 'stream', '_pos', '_data', '_peek')
     def __init__(self, message, stream):
         self.message = message
@@ -273,6 +341,17 @@ class Reader(object):
         return self._data
 
     def read(self, fieldname):
+        """
+        Read the next field from the stream. `fieldname` is used
+        to verify that your application logic matches the message
+        field order, and if `fieldname` does not match the next
+        field in the message definition, :class:`SendlibError`
+        is raised.
+
+        Returns a Python object of the correct type, depending on
+        the type present in the stream. If the type is ``data``,
+        returns a :class:`Data` file-like object.
+        """
         if self._pos == -1:
             self._pos = 0
             if PREFIX['message'] != self.stream.read(1):
@@ -307,15 +386,21 @@ _or = re.compile(r'\s*or\s*')
 _msg = re.compile(r'msg\s*\(\s*(\w+),\s*(\d+)\s*\)')
 class Field(object):
     """
-    Field contains the definition of a single field. ``name`` is
-    the expected field name, and ``types`` is a tuple of valid
-    type names for the field.
+    :class:`Field` contains the definition of a single field.
 
-    >>> f = Field('foo', 'str or nil')
-    >>> f.name
-    'foo'
-    >>> f.types
-    ('str', 'nil')
+    .. py:attribute:: message
+
+       The :class:`Message` to which this Field belongs
+
+    .. py:attribute:: name
+
+       The name of the :class:`Field`
+
+    .. py:attribute:: types
+
+       :class:`tuple` of type specifiers for this :class:`Field`,
+       which may include references to :class:`Message` instances,
+       if this :class:`Field` is a nested message field.
     """
 
     __slots__ = ('message', 'name', 'types', 'spec')
@@ -347,18 +432,26 @@ class Field(object):
 
 class Message(object):
     """
-    Message encapsulates the definition of a single message.
-    ``name`` is the message name, ``version`` is the message
-    version, and ``fields`` is a tuple of :class:`Field`
-    objects for each field.
+    :class:`Message` contains the definition of a single
+    message. `name` is the message name, `version` is the message
+    version, and `fields` is a tuple of :class:`Field`
+    objects.
 
-    >>> m = Message('foo', 1, (('i', 'int'), ('sn', 'str or nil')))
-    >>> m.name
-    'foo'
-    >>> m.version
-    1
-    >>> m.fields
-    (Field('i', ('int', )), Field('sn', ('str', 'nil')))
+    .. py:attribute:: registry
+
+       The :class:`MessageRegistry` that contains this message
+
+    .. py:attribute:: name
+
+       The name of the message
+
+    .. py:attribute:: version
+
+       The version of the message
+
+    .. py:attribute:: fields
+
+       :class:`tuple` of :class:`Field`
     """
 
     __slots__ = ('registry', 'name', 'version', 'fields')
@@ -370,31 +463,26 @@ class Message(object):
 
     def reader(self, in_stream):
         """
-        Return a :class:`Reader` object which reads messages of
-        this format from ``in_stream``. ``in_stream`` must have
-        a ``read(size)`` method.
+        Return a :class:`Reader` object which reads
+        messages of this format from `in_stream`. `in_stream`
+        must have a ``read(size)`` method.
         """
         return Reader(self, in_stream)
 
     def writer(self, out_stream):
         """
-        Return a :class:`Writer` object which writes messages of
-        this format to ``out_stream``. ``out_stream`` must have
-        a ``write(str)`` method.
+        Return a :class:`Writer` object which writes
+        messages of this format to `out_stream`. `out_stream`
+        must have a ``write(str)`` method.
         """
         return Writer(self, out_stream)
 
 
 class MessageRegistry(object):
     """
-    A :class:`MessageRegistry` contains the result of a call to
-    :func:`parse`, and is the main interface for receiving and
+    :class:`MessageRegistry` contains the definition of one or
+    more messages, and is the main interface for receiving and
     sending messages.
-
-    Messages can be retrieved programmatically from the :class:
-    `MessageRegistry` by dict-like access (using the ``[]``
-    operator), or by ``name`` and ``version`` using :meth:
-    `get_message`.
     """
 
     __slots__ = ('messages', )
@@ -404,7 +492,7 @@ class MessageRegistry(object):
     def __getitem__(self, key):
         """
         Retrieve the :class:`Message` whose name and version match
-        the given key. ``key`` is a tuple of ``(name, version)``.
+        the given key. `key` is a tuple of ``(name, version)``.
         Raises :class:`KeyError` if no such message exists.
         """
         return self.messages[key]
@@ -412,7 +500,7 @@ class MessageRegistry(object):
     def get_message(self, name, version=1):
         """
         Retrieve the :class:`Message` whose name and version match
-        ``name`` and ``version``, or return ``None`` if no such
+        `name` and `version`, or return ``None`` if no such
         message exists.
         """
         try:
@@ -420,7 +508,15 @@ class MessageRegistry(object):
         except KeyError:
             return None
 
-def parse(definition_str):
+def parse(schema):
+    """
+    Parse `schema`, either a string or a file-like object, and
+    return a :class:`MessageRegistry` with the loaded messages.
+    """
+    if not isinstance(schema, basestring):
+        # assume it is file-like
+        schema = schema.read()
+
     message = re.compile(r'^\((\w+),\s*(\d+)\):$')
     field = re.compile(r'^-\s*([^:]+):\s+(.+)$')
 
@@ -428,7 +524,7 @@ def parse(definition_str):
     messages = registry.messages
     curr = None
     names = None
-    for lineno, line in enumerate(definition_str.split('\n')):
+    for lineno, line in enumerate(schema.split('\n')):
         line = line.strip()
         if line == '' or line.startswith('#'):
             continue
